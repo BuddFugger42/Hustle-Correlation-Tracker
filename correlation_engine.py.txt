@@ -1,0 +1,188 @@
+import pandas as pd
+import numpy as np
+from scipy.stats import pearsonr
+import requests
+import asyncio
+import aiohttp
+from datetime import datetime, timedelta
+import json
+
+class CryptoCorrelationEngine:
+    def __init__(self):
+        self.base_url = "https://api.coingecko.com/api/v3"
+        self.assets = {
+            'BTC': 'bitcoin',
+            'ETH': 'ethereum', 
+            'SOL': 'solana'
+        }
+        
+    async def fetch_price_data(self, asset_id, days=90):
+        url = f"{self.base_url}/coins/{asset_id}/market_chart"
+        params = {
+            'vs_currency': 'usd',
+            'days': days,
+            'interval': 'hourly'
+        }
+        
+        async with aiohttp. ClientSession() as session:
+            async with session.get(url, params=params) as response:
+                data = await response.json()
+                
+        prices = data['prices']
+        df = pd. DataFrame(prices, columns=['timestamp', 'price'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        
+        return df
+    
+    async def get_all_price_data(self, days=90):
+        tasks = []
+        for symbol, asset_id in self.assets.items():
+            task = self.fetch_price_data(asset_id, days)
+            tasks.append(task)
+        
+        results = await asyncio.gather(*tasks)
+        
+        price_data = pd. DataFrame()
+        for i, symbol in enumerate(self.assets.keys()):
+            price_data[symbol] = results[i]['price']
+        
+        return price_data
+    
+    def calculate_returns(self, price_data):
+        return price_data.pct_change().dropna()
+    
+    def calculate_correlations(self, returns_data, window=720):
+        correlations = {}
+        pairs = [('BTC', 'SOL'), ('ETH', 'SOL'), ('BTC', 'ETH')]
+        
+        for pair in pairs:
+            asset1, asset2 = pair
+            rolling_corr = returns_data[asset1].rolling(window=window).corr(returns_data[asset2])
+            current_corr = rolling_corr.iloc[-1]
+            
+            recent_data1 = returns_data[asset1].tail(window)
+            recent_data2 = returns_data[asset2].tail(window)
+            corr_coef, p_value = pearsonr(recent_data1, recent_data2)
+            
+            strength = self.classify_correlation_strength(abs(current_corr))
+            corr_trend = self.analyze_correlation_trend(rolling_corr.tail(168))
+            
+            correlations[f"{asset1}-{asset2}"] = {
+                'coefficient': round(current_corr, 4),
+                'p_value': round(p_value, 6),
+                'strength': strength,
+                'trend': corr_trend,
+                'rolling_series': rolling_corr.tail(168).tolist()
+            }
+        
+        return correlations
+    
+    def classify_correlation_strength(self, corr):
+        if corr >= 0.9:
+            return 'very_strong'
+        elif corr >= 0.7:
+            return 'strong'
+        elif corr >= 0.5:
+            return 'moderate'
+        elif corr >= 0.3:
+            return 'weak'
+        else:
+            return 'very_weak'
+    
+    def analyze_correlation_trend(self, rolling_corr):
+        if len(rolling_corr) < 24:
+            return 'insufficient_data'
+        
+        x = np.arange(len(rolling_corr))
+        y = rolling_corr.values
+        
+        mask = ~np.isnan(y)
+        if mask.sum() < 10:
+            return 'insufficient_data'
+        
+        x_clean = x[mask]
+        y_clean = y[mask]
+        
+        slope = np.polyfit(x_clean, y_clean, 1)[0]
+        
+        if slope > 0.001:
+            return 'increasing'
+        elif slope < -0.001:
+            return 'decreasing'
+        else:
+            return 'stable'
+    
+    def detect_correlation_breakdown(self, correlations):
+        breakdown_signals = []
+        
+        for pair, data in correlations.items():
+            if abs(data['coefficient']) < 0.5:
+                breakdown_signals.append(f"{pair}_low_correlation")
+            
+            if data['trend'] == 'decreasing' and abs(data['coefficient']) < 0.7:
+                breakdown_signals.append(f"{pair}_breakdown_trend")
+        
+        return {
+            'breakdown_detected': len(breakdown_signals) > 0,
+            'signals': breakdown_signals,
+            'opportunity_level': self.classify_opportunity_level(breakdown_signals)
+        }
+    
+    def classify_opportunity_level(self, signals):
+        if len(signals) >= 3:
+            return 'high'
+        elif len(signals) >= 2:
+            return 'medium'
+        elif len(signals) >= 1:
+            return 'low'
+        else:
+            return 'none'
+    
+    async def generate_full_analysis(self, days=90, window=720):
+        try:
+            print("Fetching price data...")
+            price_data = await self.get_all_price_data(days)
+            returns_data = self.calculate_returns(price_data)
+            correlations = self.calculate_correlations(returns_data, window)
+            breakdown_analysis = self.detect_correlation_breakdown(correlations)
+            market_regime = self.detect_market_regime(correlations)
+            
+            return {
+                'timestamp': datetime.now().isoformat(),
+                'correlations': correlations,
+                'breakdown_analysis': breakdown_analysis,
+                'market_regime': market_regime,
+                'data_quality': {
+                    'total_hours': len(price_data),
+                    'missing_data_pct': (price_data.isnull().sum().sum() / (len(price_data) * 3)) * 100
+                }
+            }
+            
+        except Exception as e:
+            return {
+                'error': str(e),
+                'timestamp': datetime.now().isoformat()
+            }
+    
+    def detect_market_regime(self, correlations):
+        avg_correlation = np.mean([abs(data['coefficient']) for data in correlations.values()])
+        
+        if avg_correlation >= 0.8:
+            return {
+                'regime': 'risk_off',
+                'description': 'High correlation - everything moving together',
+                'trading_implication': 'Focus on macro factors, reduce position sizes'
+            }
+        elif avg_correlation >= 0.6:
+            return {
+                'regime': 'normal',
+                'description': 'Moderate correlation - normal market conditions',
+                'trading_implication': 'Standard trading strategies apply'
+            }
+        else:
+            return {
+                'regime': 'risk_on',
+                'description': 'Low correlation - assets moving independently',
+                'trading_implication': 'Individual asset analysis more important'
+            } 

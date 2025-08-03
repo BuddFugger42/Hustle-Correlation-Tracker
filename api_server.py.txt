@@ -1,0 +1,93 @@
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+import asyncio
+import json
+from correlation_engine import CryptoCorrelationEngine
+
+app = FastAPI(title="Crypto Correlation API", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+correlation_engine = CryptoCorrelationEngine()
+
+@app.get("/")
+async def root():
+    return {"message": "Crypto Correlation API is running"}
+
+@app.get("/api/correlations")
+async def get_correlations(
+    days: int = 90,
+    window: int = 720,
+    format: str = "standard"
+):
+    try:
+        analysis = await correlation_engine.generate_full_analysis(days, window)
+        
+        if format == "hustle":
+            return format_for_hustle_bb(analysis)
+        
+        return analysis
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/correlations/quick")
+async def get_quick_correlations():
+    try:
+        analysis = await correlation_engine.generate_full_analysis(days=30, window=168)
+        return analysis
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+def format_for_hustle_bb(analysis):
+    if 'error' in analysis:
+        return analysis
+    
+    correlations = analysis['correlations']
+    breakdown = analysis['breakdown_analysis']
+    regime = analysis['market_regime']
+    
+    bb_adjustments = {}
+    
+    for pair, data in correlations.items():
+        adjustment = 0
+        
+        if abs(data['coefficient']) < 0.5:
+            adjustment += 0.15
+        elif abs(data['coefficient']) < 0.7:
+            adjustment += 0.10
+        
+        if data['trend'] == 'decreasing':
+            adjustment += 0.05
+        
+        bb_adjustments[pair] = {
+            'probability_adjustment': adjustment,
+            'reasoning': f"Correlation: {data['coefficient']:.3f} ({data['strength']}), Trend: {data['trend']}"
+        }
+    
+    return {
+        'timestamp': analysis['timestamp'],
+        'bb_integration': {
+            'overall_adjustment': max([adj['probability_adjustment'] for adj in bb_adjustments.values()]),
+            'pair_adjustments': bb_adjustments,
+            'market_regime': regime,
+            'breakdown_detected': breakdown['breakdown_detected'],
+            'opportunity_level': breakdown['opportunity_level']
+        },
+        'raw_correlations': correlations,
+        'summary': {
+            'btc_sol': f"{correlations['BTC-SOL']['coefficient']:.3f} ({correlations['BTC-SOL']['strength']})",
+            'eth_sol': f"{correlations['ETH-SOL']['coefficient']:.3f} ({correlations['ETH-SOL']['strength']})",
+            'btc_eth': f"{correlations['BTC-ETH']['coefficient']:.3f} ({correlations['BTC-ETH']['strength']})"
+        }
+    }
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
